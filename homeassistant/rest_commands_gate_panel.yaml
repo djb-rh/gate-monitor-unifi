@@ -1,0 +1,21 @@
+# Add this to your Home Assistant configuration (either merge into an existing
+# rest_command: block in configuration.yaml, or !include this file).
+#
+# Publishes a private event to the Particle Cloud, which the Photon receives
+# via Particle.subscribe(..., MY_DEVICES) -- same mechanism the original
+# two-Photon setup used, just with Home Assistant as the publisher now.
+#
+# Requires a Particle access token in secrets.yaml:
+#   particle_access_token: "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+#
+# See README.md for how to generate a non-expiring token (an "API User" token
+# via the Particle console is recommended over a personal CLI token).
+
+rest_command:
+  particle_publish_gate_state:
+    url: "https://api.particle.io/v1/devices/events"
+    method: POST
+    headers:
+      Authorization: !secret particle_auth_header
+    content_type: "application/x-www-form-urlencoded"
+    payload: "name={{ event }}&data={{ state }}&private=true"

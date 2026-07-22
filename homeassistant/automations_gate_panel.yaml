@@ -1,0 +1,145 @@
+# Gate control panel automations.
+#
+# Merge these entries into your existing automations.yaml list (or add them via
+# Settings > Automations > Edit in YAML for a new automation, one at a time).
+#
+# Entities used (found in your Unifi Access / Unifi Protect integrations):
+#   Main gate relay:      switch.main_gate_relay_output_djb_gate_output
+#   Clubhouse gate relay:  switch.clubhouse_gate_relay_output_gate_relay
+#   Main gate state:       binary_sensor.gate            (on = open, off = closed)
+#   Clubhouse gate state:  binary_sensor.clubhouse_gate   (on = open, off = closed)
+#
+# Also requires rest_commands_gate_panel.yaml (the
+# rest_command.particle_publish_gate_state used to push state to the Photon
+# via the Particle Cloud).
+
+- id: '1784675543979'
+  alias: Gate Panel - Main Gate Open
+  description: Photon control panel button -> open the main gate relay
+  triggers:
+  - trigger: webhook
+    allowed_methods: [POST]
+    local_only: true
+    webhook_id: gatepanel-main-open-bJC4yulP6XuuD1jopP0Q
+  conditions: []
+  actions:
+  - action: switch.turn_on
+    target:
+      entity_id: switch.main_gate_relay_output_djb_gate_output
+    data: {}
+  mode: single
+
+- id: '1784675543980'
+  alias: Gate Panel - Main Gate Close
+  description: Photon control panel button -> close the main gate relay
+  triggers:
+  - trigger: webhook
+    allowed_methods: [POST]
+    local_only: true
+    webhook_id: gatepanel-main-close-vVdYVMVJnQlkhCqWHQy7
+  conditions: []
+  actions:
+  - action: switch.turn_off
+    target:
+      entity_id: switch.main_gate_relay_output_djb_gate_output
+    data: {}
+  mode: single
+
+- id: '1784675543981'
+  alias: Gate Panel - Clubhouse Gate Open
+  description: Photon control panel button -> open the clubhouse gate relay
+  triggers:
+  - trigger: webhook
+    allowed_methods: [POST]
+    local_only: true
+    webhook_id: gatepanel-club-open-oy6DqZ0wh13crgNUvZjQ
+  conditions: []
+  actions:
+  - action: switch.turn_on
+    target:
+      entity_id: switch.clubhouse_gate_relay_output_gate_relay
+    data: {}
+  mode: single
+
+- id: '1784675543982'
+  alias: Gate Panel - Clubhouse Gate Close
+  description: Photon control panel button -> close the clubhouse gate relay
+  triggers:
+  - trigger: webhook
+    allowed_methods: [POST]
+    local_only: true
+    webhook_id: gatepanel-club-close-KOewgWR6nQC8ae3oGX01
+  conditions: []
+  actions:
+  - action: switch.turn_off
+    target:
+      entity_id: switch.clubhouse_gate_relay_output_gate_relay
+    data: {}
+  mode: single
+
+- id: '1784675543983'
+  alias: Gate Panel - Push Main Gate State
+  description: Main gate state changed -> publish it to the Particle Cloud for the panel
+  triggers:
+  - trigger: state
+    entity_id: binary_sensor.gate
+  conditions: []
+  actions:
+  - action: rest_command.particle_publish_gate_state
+    data:
+      event: main_gate_state
+      state: "{{ 'open' if trigger.to_state.state == 'on' else 'closed' }}"
+  mode: single
+
+- id: '1784675543984'
+  alias: Gate Panel - Push Clubhouse Gate State
+  description: Clubhouse gate state changed -> publish it to the Particle Cloud for the panel
+  triggers:
+  - trigger: state
+    entity_id: binary_sensor.clubhouse_gate
+  conditions: []
+  actions:
+  - action: rest_command.particle_publish_gate_state
+    data:
+      event: club_gate_state
+      state: "{{ 'open' if trigger.to_state.state == 'on' else 'closed' }}"
+  mode: single
+
+- id: '1784675543985'
+  alias: Gate Panel - Push State on Request
+  description: Photon asked for current state on boot -> publish both gates
+  triggers:
+  - trigger: webhook
+    allowed_methods: [POST]
+    local_only: true
+    webhook_id: gatepanel-request-state-lpHSDjBJcVTTjEO39fT8
+  conditions: []
+  actions:
+  - action: rest_command.particle_publish_gate_state
+    data:
+      event: main_gate_state
+      state: "{{ 'open' if states('binary_sensor.gate') == 'on' else 'closed' }}"
+  - action: rest_command.particle_publish_gate_state
+    data:
+      event: club_gate_state
+      state: "{{ 'open' if states('binary_sensor.clubhouse_gate') == 'on' else 'closed' }}"
+  mode: single
+
+- id: '1784675543986'
+  alias: Gate Panel - Push State on HA Start
+  description: Home Assistant restarted -> publish both gates in case the Photon missed something
+  triggers:
+  - trigger: homeassistant
+    event: start
+  conditions: []
+  actions:
+  - delay: '00:00:15'
+  - action: rest_command.particle_publish_gate_state
+    data:
+      event: main_gate_state
+      state: "{{ 'open' if states('binary_sensor.gate') == 'on' else 'closed' }}"
+  - action: rest_command.particle_publish_gate_state
+    data:
+      event: club_gate_state
+      state: "{{ 'open' if states('binary_sensor.clubhouse_gate') == 'on' else 'closed' }}"
+  mode: single

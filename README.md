@@ -1,5 +1,7 @@
 # Gate Panel — Unifi Access/Protect edition
 
+![Installed gate panel, both gates open](images/gate-panel-installed.jpg)
+
 The control panel (buttons, LCD, NeoPixels) talks to Home Assistant, which
 talks to Unifi Access/Protect. Two different transports are used for the two
 directions, deliberately:

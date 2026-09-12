@@ -2,3 +2,4 @@ lib/
 target/
 .DS_Store
 *.bin
+src/ha-config.h

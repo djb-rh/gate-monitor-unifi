@@ -59,12 +59,16 @@ is what the button-press direction here follows.
    particle_auth_header: "Bearer YOUR_TOKEN_HERE"
    ```
 
-3. **Edit the firmware config.** In `src/gate-monitor.ino`, set `HA_HOST` to
-   your Home Assistant's local IP or hostname (this is only used for the
-   outbound button-press webhooks).
+3. **Create the local firmware config.** Copy `src/ha-config.h.example` to
+   `src/ha-config.h` and set `HA_HOST` to your Home Assistant's local IP or
+   hostname (this is only used for the outbound button-press webhooks).
+   `src/ha-config.h` is gitignored, so your address stays out of the repo and
+   never shows up as an uncommitted change. Building without it fails with a
+   message telling you to create it.
 
-4. **Flash the Photon** with `src/gate-monitor.ino` (same libraries as before:
-   `LiquidCrystal_I2C_Spark`, `clickButton`, `neopixel`).
+4. **Flash the Photon** with `particle flash <device> .` from the project root.
+   The libraries (`LiquidCrystal_I2C_Spark`, `clickButton`, `neopixel`) are
+   declared in `project.properties`, so they're pulled in automatically.
 
 5. **Add the Home Assistant config:**
    - Merge `homeassistant/rest_commands_gate_panel.yaml` into your
@@ -108,6 +112,16 @@ is what the button-press direction here follows.
   defaulting to "open" if state is still unknown (e.g. right after boot,
   before the first state push arrives). This replaces the old panel's local
   toggle guess, which didn't have any ground truth to check itself against.
+- **Pending-state feedback.** A gate takes a while to swing, so between the
+  press and the confirming state push there used to be no feedback at all --
+  the button kept showing the *old* state and looked like nothing had
+  happened. Now pressing a button starts a "pending" state for that gate: its
+  pixel blinks slowly red/green (600ms each) and the LCD reads
+  `Opening`/`Closing` until Home Assistant reports the state you actually
+  asked for, at which point it goes solid. An intermediate or contrary report
+  leaves it blinking. If the gate never confirms, `PENDING_TIMEOUT_MS` (90s)
+  gives up and falls back to the last known state rather than blinking
+  forever. Pressing again while pending just restarts the timer.
 - **Dropped the old "skip counter" digit** that appeared in the corner of the
   LCD in the previous firmware — that was specific to the old
   Photon-to-Photon protocol and doesn't have an equivalent concept in the

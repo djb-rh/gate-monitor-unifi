@@ -18,7 +18,14 @@
  *                Photon as the publisher. No local server, no static IP
  *                needed on this device for that direction.
  *
- *              See ../homeassistant/*.yaml for the Home Assistant side, and
+ *              - Between those two: once a button is pressed the panel does
+ *                not know the new state yet (the gate takes a while to swing),
+ *                so that button's pixel blinks slowly red/green and the LCD
+ *                says Opening/Closing until the matching state event
+ *                arrives from Home Assistant (or PENDING_TIMEOUT_MS passes,
+ *                at which point we fall back to the last known state).
+ *
+ *              See the homeassistant/ yaml files for the Home Assistant side, and
  *              ../README.md for full setup instructions (including how to
  *              create the Particle access token HA needs).
  *
@@ -32,13 +39,24 @@
 #include <neopixel.h>
 
 // ---------------------------------------------------------------------------
-// CONFIG -- edit these for your network before flashing
+// CONFIG
 // ---------------------------------------------------------------------------
 
-// Local IP or hostname of your Home Assistant instance, used only for the
-// outbound button-press webhooks.
-#define HA_HOST "192.168.1.50"      // TODO: replace with your HA's local IP
+// HA_HOST (and optionally HA_PORT) come from src/ha-config.h, which is
+// gitignored -- copy src/ha-config.h.example to create it. Keeping the address
+// out of this file means the repo stays publishable as-is and your local
+// settings don't show up as uncommitted changes every time you build.
+#if __has_include("ha-config.h")
+#include "ha-config.h"
+#endif
+
+#ifndef HA_HOST
+#error "Missing src/ha-config.h -- copy src/ha-config.h.example to src/ha-config.h and set HA_HOST"
+#endif
+
+#ifndef HA_PORT
 #define HA_PORT 8123
+#endif
 
 // Webhook IDs -- must exactly match the automations in
 // homeassistant/automations_gate_panel.yaml
@@ -53,6 +71,14 @@
 #define EVENT_MAIN_GATE_STATE "main_gate_state"
 #define EVENT_CLUB_GATE_STATE "club_gate_state"
 
+// How long a pixel blinks waiting for the gate to reach the requested state
+// before we give up and go back to showing the last known state. The main
+// gate is the slow one; 90s is comfortably longer than a full swing.
+#define PENDING_TIMEOUT_MS 90000UL
+
+// Blink half-period: this many ms red, then this many ms green, repeat.
+#define BLINK_HALF_PERIOD_MS 600UL
+
 // ---------------------------------------------------------------------------
 
 int out = D7;
@@ -62,6 +88,13 @@ Adafruit_NeoPixel pixels = Adafruit_NeoPixel(2, out, WS2811);
 
 void mainGateStateHandler(const char *eventName, const char *data);
 void clubGateStateHandler(const char *eventName, const char *data);
+void startPending(int *target, unsigned long *start, int wantedState);
+void expirePending();
+void updatePixels();
+void lcdLine(int row, const char *label, const char *value);
+void lcdMain(const char *value);
+void lcdClub(const char *value);
+void sendWebhook(const char *webhookId);
 
 LiquidCrystal_I2C lcd(0x27,20,4);  // set the LCD address to 0x27 for a 20 chars and 4 line display
 
@@ -78,6 +111,18 @@ int buttonOneClicks = 0;
 // Assistant (not assumed locally). 0 = unknown, 1 = open, 2 = closed
 int mainGateState = 0;
 int clubGateState = 0;
+
+// A change we've asked for but haven't seen confirmed yet.
+// 0 = nothing pending, 1 = waiting for open, 2 = waiting for closed.
+int mainPendingTarget = 0;
+int clubPendingTarget = 0;
+unsigned long mainPendingStart = 0;
+unsigned long clubPendingStart = 0;
+
+// Last values actually pushed to the strip, so we only call pixels.show()
+// when something really changed. 0xFFFFFFFF is "nothing shown yet".
+uint32_t shownMainColor = 0xFFFFFFFF;
+uint32_t shownClubColor = 0xFFFFFFFF;
 
 int bootRequestSent = 0;
 
@@ -141,9 +186,13 @@ void loop() {
         if (mainGateState == 1) {
             // known open -> close it
             sendWebhook(WEBHOOK_MAIN_CLOSE);
+            startPending(&mainPendingTarget, &mainPendingStart, 2);
+            lcdMain("Closing");
         } else {
             // closed, or unknown -- default to open
             sendWebhook(WEBHOOK_MAIN_OPEN);
+            startPending(&mainPendingTarget, &mainPendingStart, 1);
+            lcdMain("Opening");
         }
     }
 
@@ -152,14 +201,98 @@ void loop() {
     if (buttonOneClicks == 1) {
         if (clubGateState == 1) {
             sendWebhook(WEBHOOK_CLUB_CLOSE);
+            startPending(&clubPendingTarget, &clubPendingStart, 2);
+            lcdClub("Closing");
         } else {
             sendWebhook(WEBHOOK_CLUB_OPEN);
+            startPending(&clubPendingTarget, &clubPendingStart, 1);
+            lcdClub("Opening");
         }
     }
 
     buttonZeroClicks = 0;
     buttonOneClicks = 0;
+
+    expirePending();
+    updatePixels();
 }
+
+// ---------------------------------------------------------------------------
+// Pending-change bookkeeping + pixel rendering
+// ---------------------------------------------------------------------------
+
+// Mark a gate as "asked to change, waiting for Home Assistant to confirm".
+// Pressing again while already pending just restarts the timeout.
+void startPending(int *target, unsigned long *start, int wantedState) {
+    *target = wantedState;
+    *start = millis();
+}
+
+// If the gate never reports the state we asked for, stop blinking eventually
+// and go back to displaying whatever we last actually knew.
+void expirePending() {
+    unsigned long now = millis();
+
+    if (mainPendingTarget != 0 && (now - mainPendingStart) > PENDING_TIMEOUT_MS) {
+        mainPendingTarget = 0;
+        lcdMain(mainGateState == 1 ? "Open" : (mainGateState == 2 ? "Closed" : "DUNNO"));
+    }
+
+    if (clubPendingTarget != 0 && (now - clubPendingStart) > PENDING_TIMEOUT_MS) {
+        clubPendingTarget = 0;
+        lcdClub(clubGateState == 1 ? "Open" : (clubGateState == 2 ? "Closed" : "DUNNO"));
+    }
+}
+
+// Pack a color the same way Adafruit_NeoPixel does, so we can compare against
+// what's already on the strip.
+uint32_t rgb(uint8_t r, uint8_t g, uint8_t b) {
+    return ((uint32_t)r << 16) | ((uint32_t)g << 8) | b;
+}
+
+// What color should this gate's button be right now? Pending gates alternate
+// red/green on the shared blink phase; settled ones are solid.
+uint32_t colorFor(int state, int pendingTarget, int blinkPhase) {
+    if (pendingTarget != 0) {
+        return blinkPhase ? rgb(0,55,0) : rgb(55,0,0);
+    }
+    if (state == 1) return rgb(0,55,0);     // open
+    if (state == 2) return rgb(55,0,0);     // closed
+    return rgb(0,0,255);                    // blue is don't know
+}
+
+void updatePixels() {
+    // Both buttons share one phase so a simultaneous pair blinks together.
+    int blinkPhase = (millis() / BLINK_HALF_PERIOD_MS) & 1;
+
+    uint32_t mainColor = colorFor(mainGateState, mainPendingTarget, blinkPhase);
+    uint32_t clubColor = colorFor(clubGateState, clubPendingTarget, blinkPhase);
+
+    if (mainColor == shownMainColor && clubColor == shownClubColor) return;
+
+    pixels.setPixelColor(0, mainColor);
+    pixels.setPixelColor(1, clubColor);
+    pixels.show();
+
+    shownMainColor = mainColor;
+    shownClubColor = clubColor;
+}
+
+// ---------------------------------------------------------------------------
+// LCD helpers -- pad to the full 20 columns so shorter words don't leave
+// leftovers from whatever was printed before.
+// ---------------------------------------------------------------------------
+void lcdLine(int row, const char *label, const char *value) {
+    char buf[21];
+    snprintf(buf, sizeof(buf), "%s%s", label, value);
+    for (int i = strlen(buf); i < 20; i++) buf[i] = ' ';
+    buf[20] = '\0';
+    lcd.setCursor(0, row);
+    lcd.print(buf);
+}
+
+void lcdMain(const char *value) { lcdLine(1, "Main Gate: ", value); }
+void lcdClub(const char *value) { lcdLine(0, "CH Gate: ", value); }
 
 // ---------------------------------------------------------------------------
 // Outbound: fire a Home Assistant local webhook, plain HTTP, no auth needed
@@ -185,38 +318,48 @@ void sendWebhook(const char *webhookId) {
 
 // ---------------------------------------------------------------------------
 // Inbound: Particle Cloud event handlers. Home Assistant publishes
-// data="open" or data="closed".
+// data="open" or data="closed". Reaching the state we were waiting on clears
+// the pending blink; any other state leaves it blinking (the gate is still
+// on its way).
 // ---------------------------------------------------------------------------
 void mainGateStateHandler(const char *eventName, const char *data)
 {
     if (!data) return;
 
-    lcd.setCursor(0, 1);
     if (!strncmp(data, "open", 4)) {
         mainGateState = 1;
-        lcd.print("Main Gate: Open     ");
-        pixels.setPixelColor(0, 0,55,0);
     } else if (!strncmp(data, "closed", 6)) {
         mainGateState = 2;
-        lcd.print("Main Gate: Closed   ");
-        pixels.setPixelColor(0, 55,0,0);
+    } else {
+        return;
     }
-    pixels.show();
+
+    if (mainPendingTarget == mainGateState) mainPendingTarget = 0;
+
+    if (mainPendingTarget == 0) {
+        lcdMain(mainGateState == 1 ? "Open" : "Closed");
+    }
+
+    updatePixels();
 }
 
 void clubGateStateHandler(const char *eventName, const char *data)
 {
     if (!data) return;
 
-    lcd.setCursor(0, 0);
     if (!strncmp(data, "open", 4)) {
         clubGateState = 1;
-        lcd.print("CH Gate: Open     ");
-        pixels.setPixelColor(1, 0,55,0);
     } else if (!strncmp(data, "closed", 6)) {
         clubGateState = 2;
-        lcd.print("CH Gate: Closed   ");
-        pixels.setPixelColor(1, 55,0,0);
+    } else {
+        return;
     }
-    pixels.show();
+
+    if (clubPendingTarget == clubGateState) clubPendingTarget = 0;
+
+    if (clubPendingTarget == 0) {
+        lcdClub(clubGateState == 1 ? "Open" : "Closed");
+    }
+
+    updatePixels();
 }
